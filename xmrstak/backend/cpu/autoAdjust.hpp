@@ -7,6 +7,7 @@
 #include "xmrstak/misc/configEditor.hpp"
 #include "xmrstak/params.hpp"
 #include "xmrstak/backend/cryptonight.hpp"
+#include "xmrstak/backend/cpu/cpuType.hpp"
 #include <string>
 
 #ifdef _WIN32
@@ -20,14 +21,6 @@ namespace xmrstak
 {
 namespace cpu
 {
-// Mask bits between h and l and return the value
-// This enables us to put in values exactly like in the manual
-// For example EBX[31:22] is get_masked(cpu_info[1], 31, 22)
-inline int32_t get_masked(int32_t val, int32_t h, int32_t l)
-{
-	val &= (0x7FFFFFFF >> (31-(h-l))) << l;
-	return val >> l;
-}
 
 class autoAdjust
 {
@@ -35,11 +28,15 @@ public:
 
 	bool printConfig()
 	{
+		auto neededAlgorithms = ::jconf::inst()->GetCurrentCoinSelection().GetAllAlgorithms();
 
-		const size_t hashMemSizeKB = std::max(
-			cn_select_memory(::jconf::inst()->GetCurrentCoinSelection().GetDescription(1).GetMiningAlgo()),
-			cn_select_memory(::jconf::inst()->GetCurrentCoinSelection().GetDescription(1).GetMiningAlgoRoot())
-		) / 1024u;
+		size_t hashMemSize = 0;
+		for(const auto algo : neededAlgorithms)
+		{
+			hashMemSize = std::max(hashMemSize, algo.Mem());
+		}
+		const size_t hashMemSizeKB = hashMemSize / 1024u;
+
 		const size_t halfHashMemSizeKB = hashMemSizeKB / 2u;
 
 		configEditor configTpl{};
@@ -52,13 +49,20 @@ public:
 
 		std::string conf;
 
-		
+		// if cryptonight_gpu is used we will disable cpu mining but provide a inactive config
+		bool useCryptonight_gpu = ::jconf::inst()->GetCurrentCoinSelection().GetDescription(1).GetMiningAlgo() == cryptonight_gpu;
+
+		if(useCryptonight_gpu)
+		{
+			printer::inst()->print_msg(L0, "WARNING: CPU mining will be disabled because cryptonight_gpu is not suitable for CPU mining. You can uncomment the auto generated config in %s to enable CPU mining.", params::inst().configFileCPU.c_str());
+			conf += "/*\n//CPU config is disabled by default because cryptonight_gpu is not suitable for CPU mining.\n";
+		}
 		if(!detectL3Size() || L3KB_size < halfHashMemSizeKB || L3KB_size > (halfHashMemSizeKB * 2048u))
 		{
 			if(L3KB_size < halfHashMemSizeKB || L3KB_size > (halfHashMemSizeKB * 2048))
 				printer::inst()->print_msg(L0, "Autoconf failed: L3 size sanity check failed - %u KB.", L3KB_size);
 
-			conf += std::string("    { \"low_power_mode\" : false, \"no_prefetch\" : true, \"affine_to_cpu\" : false },\n");
+			conf += std::string("    { \"low_power_mode\" : false, \"no_prefetch\" : true,  \"asm\" : \"off\", \"affine_to_cpu\" : false },\n");
 			printer::inst()->print_msg(L0, "Autoconf FAILED. Create config for a single thread. Please try to add new ones until the hashrate slows down.");
 		}
 		else
@@ -82,7 +86,7 @@ public:
 
 				conf += std::string("    { \"low_power_mode\" : ");
 				conf += std::string(double_mode ? "true" : "false");
-				conf += std::string(", \"no_prefetch\" : true, \"affine_to_cpu\" : ");
+				conf += std::string(", \"no_prefetch\" : true, \"asm\" : \"auto\", \"affine_to_cpu\" : ");
 				conf += std::to_string(aff_id);
 				conf += std::string(" },\n");
 
@@ -102,6 +106,9 @@ public:
 					L3KB_size -= hashMemSizeKB;
 			}
 		}
+
+		if(useCryptonight_gpu)
+			conf += "*/\n";
 
 		configTpl.replace("CPUCONFIG",conf);
 		configTpl.write(params::inst().configFileCPU);
@@ -127,7 +134,7 @@ private:
 
 			if(get_masked(cpu_info[0], 7, 5) != 3)
 			{
-				printer::inst()->print_msg(L0, "Autoconf failed: Couln't find L3 cache page.");
+				printer::inst()->print_msg(L0, "Autoconf failed: Couldn't find L3 cache page.");
 				return false;
 			}
 
@@ -143,7 +150,8 @@ private:
 			L3KB_size = get_masked(cpu_info[3], 31, 18) * 512;
 
 			::jconf::cpuid(1, 0, cpu_info);
-			if(get_masked(cpu_info[0], 11, 8) < 0x17) //0x17h is Zen
+
+			if(getModel().family < 0x17) //0x17h is Zen
 				old_amd = true;
 
 			return true;
