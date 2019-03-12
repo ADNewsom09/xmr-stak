@@ -28,16 +28,18 @@ public:
 
 	autoAdjust()
 	{
-		hashMemSize = std::max(
-			cn_select_memory(::jconf::inst()->GetCurrentCoinSelection().GetDescription(1).GetMiningAlgo()),
-			cn_select_memory(::jconf::inst()->GetCurrentCoinSelection().GetDescription(1).GetMiningAlgoRoot())
-		);
+		auto neededAlgorithms = ::jconf::inst()->GetCurrentCoinSelection().GetAllAlgorithms();
+
+		for(const auto algo : neededAlgorithms)
+		{
+			hashMemSize = std::max(hashMemSize, algo.Mem());
+		}
 		halfHashMemSize = hashMemSize / 2u;
 	}
 
 	bool printConfig()
 	{
-		
+
 		hwloc_topology_t topology;
 		hwloc_topology_init(&topology);
 		hwloc_topology_load(topology);
@@ -50,6 +52,15 @@ public:
 			#include "./config.tpl"
 		;
 		configTpl.set( std::string(tpl) );
+
+		// if cryptonight_gpu is used we will disable cpu mining but provide a inactive config
+		bool useCryptonight_gpu = ::jconf::inst()->GetCurrentCoinSelection().GetDescription(1).GetMiningAlgo() == cryptonight_gpu;
+
+		if(useCryptonight_gpu)
+		{
+			printer::inst()->print_msg(L0, "WARNING: CPU mining will be disabled because cryptonight_gpu is not suitable for CPU mining. You can uncomment the auto generated config in %s to enable CPU mining.", params::inst().configFileCPU.c_str());
+			conf += "/*\n//CPU config is disabled by default because cryptonight_gpu is not suitable for CPU mining.\n";
+		}
 
 		try
 		{
@@ -64,13 +75,13 @@ public:
 				throw(std::runtime_error("The CPU doesn't seem to have a cache."));
 
 			for(hwloc_obj_t obj : tlcs)
-				proccessTopLevelCache(obj);
-			
+				processTopLevelCache(obj);
+
 			for(uint32_t id : results)
 			{
 				conf += std::string("    { \"low_power_mode\" : ");
 				conf += std::string((id & 0x8000000) != 0 ? "true" : "false");
-				conf += std::string(", \"no_prefetch\" : true, \"affine_to_cpu\" : ");
+				conf += std::string(", \"no_prefetch\" : true, \"asm\" : \"auto\", \"affine_to_cpu\" : ");
 				conf += std::to_string(id & 0x7FFFFFF);
 				conf += std::string(" },\n");
 			}
@@ -78,9 +89,13 @@ public:
 		catch(const std::runtime_error& err)
 		{
 			// \todo add fallback to default auto adjust
-			conf += std::string("    { \"low_power_mode\" : false, \"no_prefetch\" : true, \"affine_to_cpu\" : false },\n");
+			conf += std::string("    { \"low_power_mode\" : false");
+			conf += std::string(", \"no_prefetch\" : true, \"asm\" : \"off\", \"affine_to_cpu\" : false },\n");
 			printer::inst()->print_msg(L0, "Autoconf FAILED: %s. Create config for a single thread.", err.what());
 		}
+
+		if(useCryptonight_gpu)
+			conf += "*/\n";
 
 		configTpl.replace("CPUCONFIG",conf);
 		configTpl.write(params::inst().configFileCPU);
@@ -92,8 +107,8 @@ public:
 	}
 
 private:
-	size_t hashMemSize;
-	size_t halfHashMemSize;
+	size_t hashMemSize = 0;
+	size_t halfHashMemSize = 0;
 
 	std::vector<uint32_t> results;
 
@@ -138,7 +153,7 @@ private:
 
 	// Top level cache isn't shared with other cores on the same package
 	// This will usually be 1 x L3, but can be 2 x L2 per package
-	void proccessTopLevelCache(hwloc_obj_t obj)
+	void processTopLevelCache(hwloc_obj_t obj)
 	{
 		if(obj->attr == nullptr)
 			throw(std::runtime_error("Cache object hasn't got attributes."));
@@ -158,7 +173,7 @@ private:
 
 			//Try our luck with lower level caches
 			for(size_t i=0; i < obj->arity; i++)
-				proccessTopLevelCache(obj->children[i]);
+				processTopLevelCache(obj->children[i]);
 			return;
 		}
 
